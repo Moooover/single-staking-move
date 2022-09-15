@@ -18,7 +18,7 @@ module SimpleFarm::Staking {
     const ACC_PRECISION: u128 = 100000000000;
     const TOKEN_PER_SECOND: u64 = 100;
 
-    struct StakeInfo has key, store, drop {
+    struct StakeInfo has key, store {
         amount: u64,
         reward_amount: u128,
         reward_debt: u128,
@@ -190,17 +190,6 @@ module SimpleFarm::Staking {
     #[test_only]
     struct LpCoin {}
 
-    #[test_only]
-    public fun get_resource_account(source: address, seed: vector<u8>): address {
-        use std::hash;
-        use std::bcs;
-        use std::vector;
-        let bytes = bcs::to_bytes(&source);
-        vector::append(&mut bytes, seed);
-        let addr = account::create_address_for_test(hash::sha3_256(bytes));
-        addr
-    }
-
     #[test(alice = @0x1, stakeModule = @SimpleFarm)]
     public entry fun can_initialize(alice: signer, stakeModule: signer){
         let alice_addr = signer::address_of(&alice);
@@ -216,7 +205,7 @@ module SimpleFarm::Staking {
         initialize<LpCoin>(&stakeModule, b"wsol-pool");
 
         // check pool balance
-        let pool_addr = get_resource_account(@SimpleFarm, b"wsol-pool");
+        let pool_addr = account::create_resource_address(&@SimpleFarm, b"wsol-pool");
         assert!(coin::balance<LpCoin>(pool_addr) == 0, EINVALID_BALANCE);
 
         // alice stake 1000 to pool

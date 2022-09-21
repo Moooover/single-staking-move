@@ -1,11 +1,7 @@
 module SimpleFarm::Staking {
     use std::signer;
     use aptos_framework::coin;
-    use aptos_framework::account;
-    use aptos_framework::managed_coin;
     use aptos_framework::timestamp;
-
-    use aptos_std::type_info;
 
     const EPOOL_NOT_INITIALIZED: u64 = 0;
     const EINVALID_DEDICATED_INITIALIZER: u64 = 4;
@@ -18,43 +14,39 @@ module SimpleFarm::Staking {
     const ACC_PRECISION: u128 = 100000000000;
     const TOKEN_PER_SECOND: u64 = 100;
 
-    struct StakeInfo has key, store {
+    struct StakeInfo<phantom CoinType> has key {
         amount: u64,
         reward_amount: u128,
-        reward_debt: u128,
+        reward_debt: u128
     }
 
-    struct PoolInfo has key, store {
+    struct PoolInfo<phantom CoinType> has key {
         owner_addr: address,
-        amount: u128,
         acc_reward_per_share: u64,
         token_per_second: u64,
         last_reward_time: u64,
         staker_count: u64,
-        resource_cap: account::SignerCapability,
+        staked_coins: coin::Coin<CoinType>
     }
 
-    public entry fun initialize<CoinType>(initializer: &signer, seeds: vector<u8>) {
+    public entry fun initialize<CoinType>(initializer: &signer) {
         let owner_addr = signer::address_of(initializer);
-        // assert!(owner_addr == @Initializer, EINVALID_DEDICATED_INITIALIZER);
-        let (pool, pool_signer_cap) = account::create_resource_account(initializer, seeds);
+        assert!(owner_addr == @SimpleFarm, EINVALID_DEDICATED_INITIALIZER);
 
         let current_time = timestamp::now_seconds();
-        move_to<PoolInfo>(&pool, PoolInfo {
+        move_to<PoolInfo<CoinType>>(initializer, PoolInfo<CoinType> {
             owner_addr,
-            amount: 0,
             acc_reward_per_share: 0,
             token_per_second: TOKEN_PER_SECOND,
-            resource_cap: pool_signer_cap,
-            last_reward_time: current_time.
+            last_reward_time: current_time,
             staker_count: 0,
+            staked_coins: coin::zero<CoinType>()
         });
-        coin::register<CoinType>(&pool);
     }
 
-    public entry fun transfer_ownership(current_owner: &signer, new_owner_addr: address, pool_addr: address) acquires PoolInfo {
-        assert!(exists<PoolInfo>(pool_addr), EPOOL_NOT_INITIALIZED);
-        let pool_info = borrow_global_mut<PoolInfo>(pool_addr);
+    public entry fun transfer_ownership<CoinType>(current_owner: &signer, new_owner_addr: address, pool_addr: address) acquires PoolInfo {
+        assert!(exists<PoolInfo<CoinType>>(pool_addr), EPOOL_NOT_INITIALIZED);
+        let pool_info = borrow_global_mut<PoolInfo<CoinType>>(pool_addr);
 
         let current_owner_addr = signer::address_of(current_owner);
         assert!(pool_info.owner_addr == current_owner_addr, EINVALID_OWNER);
@@ -63,52 +55,49 @@ module SimpleFarm::Staking {
     }
 
     public entry fun stake<CoinType>(staker: &signer, amount: u64, pool_addr: address) acquires PoolInfo, StakeInfo {
-        assert!(exists<PoolInfo>(pool_addr), EPOOL_NOT_INITIALIZED);
+        assert!(exists<PoolInfo<CoinType>>(pool_addr), EPOOL_NOT_INITIALIZED);
 
-        let pool_info = borrow_global_mut<PoolInfo>(pool_addr);
-        update_pool(pool_info);
+        let pool_info = borrow_global_mut<PoolInfo<CoinType>>(pool_addr);
+        update_pool<CoinType>(pool_info);
 
         let staker_addr = signer::address_of(staker);
-        if (!exists<StakeInfo>(staker_addr)) {
-            move_to<StakeInfo>(staker, StakeInfo {
+        if (!exists<StakeInfo<CoinType>>(staker_addr)) {
+            move_to<StakeInfo<CoinType>>(staker, StakeInfo {
                 amount,
                 reward_amount: 0,
                 reward_debt: 0
             });
             pool_info.staker_count = pool_info.staker_count + 1;
         } else {
-            let stake_info = borrow_global_mut<StakeInfo>(staker_addr);
-            update_reward_amount(stake_info, pool_info);
+            let stake_info = borrow_global_mut<StakeInfo<CoinType>>(staker_addr);
+            update_reward_amount<CoinType>(stake_info, pool_info);
             stake_info.amount = stake_info.amount + amount;
-            calculate_reward_debt(stake_info, pool_info);
+            calculate_reward_debt<CoinType>(stake_info, pool_info);
         };
-        
-        pool_info.amount = pool_info.amount + (amount as u128);
-
-        coin::transfer<CoinType>(staker, pool_addr, amount);
+      
+        let withdraw_coin = coin::withdraw<CoinType>(staker, amount);
+        coin::merge<CoinType>(&mut pool_info.staked_coins, withdraw_coin);
     }
 
     public entry fun unstake<CoinType>(unstaker: &signer, amount: u64, pool_addr: address) acquires PoolInfo, StakeInfo {
-        assert!(exists<PoolInfo>(pool_addr), EPOOL_NOT_INITIALIZED);
+        assert!(exists<PoolInfo<CoinType>>(pool_addr), EPOOL_NOT_INITIALIZED);
 
         let unstaker_addr = signer::address_of(unstaker);
-        assert!(exists<StakeInfo>(unstaker_addr), EUSER_DIDNT_STAKE);
+        assert!(exists<StakeInfo<CoinType>>(unstaker_addr), EUSER_DIDNT_STAKE);
         
-        let pool_info = borrow_global_mut<PoolInfo>(pool_addr);
-        update_pool(pool_info);
+        let pool_info = borrow_global_mut<PoolInfo<CoinType>>(pool_addr);
+        update_pool<CoinType>(pool_info);
 
-        let stake_info = borrow_global_mut<StakeInfo>(unstaker_addr);
+        let stake_info = borrow_global_mut<StakeInfo<CoinType>>(unstaker_addr);
         assert!(amount <= stake_info.amount, EINVALID_VALUE);
-        update_reward_amount(stake_info, pool_info);
+        update_reward_amount<CoinType>(stake_info, pool_info);
         stake_info.amount = stake_info.amount - amount;
-        calculate_reward_debt(stake_info, pool_info);
+        calculate_reward_debt<CoinType>(stake_info, pool_info);
         
-        pool_info.amount = pool_info.amount - (amount as u128);
-
-        let pool_account_from_cap = account::create_signer_with_capability(&pool_info.resource_cap);
-        coin::transfer<CoinType>(&pool_account_from_cap, unstaker_addr, amount);
+        let withdraw_coin = coin::extract<CoinType>(&mut pool_info.staked_coins, stake_info.amount);
+        coin::deposit<CoinType>(unstaker_addr, withdraw_coin);
     }
-
+/*
     public entry fun harvest<CoinType>(staker: &signer, pool_addr: address) acquires PoolInfo, StakeInfo {
         assert!(exists<PoolInfo>(pool_addr), EPOOL_NOT_INITIALIZED);
         check_reward_coin_type<CoinType>();
@@ -156,18 +145,19 @@ module SimpleFarm::Staking {
         let pool_account_from_cap = account::create_signer_with_capability(&pool_info.resource_cap);
         coin::transfer<CoinType>(&pool_account_from_cap, owner_addr, amount);
     }
-
-    fun update_pool(pool_info: &mut PoolInfo) {
+*/
+    fun update_pool<CoinType>(pool_info: &mut PoolInfo<CoinType>) {
         let current_time = timestamp::now_seconds();
         let passed_seconds = current_time - pool_info.last_reward_time;
         let reward_per_share = 0;
-        if (pool_info.amount != 0)
-            reward_per_share = (pool_info.token_per_second as u128) * (passed_seconds as u128) * ACC_PRECISION / pool_info.amount;
+        let pool_total_amount = coin::value(&pool_info.staked_coins);
+        if (pool_total_amount != 0)
+            reward_per_share = (pool_info.token_per_second as u128) * (passed_seconds as u128) * ACC_PRECISION / (pool_total_amount as u128);
         pool_info.acc_reward_per_share = pool_info.acc_reward_per_share + (reward_per_share as u64);
         pool_info.last_reward_time = current_time;
     }
 
-    fun update_reward_amount(stake_info: &mut StakeInfo, pool_info: &PoolInfo) {
+    fun update_reward_amount<CoinType>(stake_info: &mut StakeInfo<CoinType>, pool_info: &PoolInfo<CoinType>) {
         let pending_reward = (stake_info.amount as u128)
             * (pool_info.acc_reward_per_share as u128)
             / ACC_PRECISION
@@ -175,20 +165,15 @@ module SimpleFarm::Staking {
         stake_info.reward_amount = stake_info.reward_amount + pending_reward;
     }
 
-    fun calculate_reward_debt(stake_info: &mut StakeInfo, pool_info: &PoolInfo) {
+    fun calculate_reward_debt<CoinType>(stake_info: &mut StakeInfo<CoinType>, pool_info: &PoolInfo<CoinType>) {
         stake_info.reward_debt = (stake_info.amount as u128) * (pool_info.acc_reward_per_share as u128) / ACC_PRECISION
-    }
-
-    fun check_reward_coin_type<CoinType>() {
-        assert!(@MoonCoinType == type_info::account_address(&type_info::type_of<CoinType>()), EINVALID_COIN);
-    }
-
-    fun check_stake_coin_type<CoinType>() {
-        //assert!(@MoonCoinType == type_info::account_address(&type_info::type_of<CoinType>()), EINVALID_COIN);
     }
 
     #[test_only]
     struct LpCoin {}
+
+    #[test_only]
+    use aptos_framework::managed_coin;
 
     #[test(alice = @0x1, stakeModule = @SimpleFarm)]
     public entry fun can_initialize(alice: signer, stakeModule: signer){
